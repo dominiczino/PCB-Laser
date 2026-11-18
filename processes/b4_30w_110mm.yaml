@@ -1,0 +1,33 @@
+# ComMarker B4, 30 W Q-switched fiber, 110 mm lens (assumed - verify).
+# Source: "Laser Engraver Recipie List" / PCB Manufacturing (Google Sheets).
+machine:
+  field_mm: 110
+  cor_file: machine/110mm/jcz11.cor
+  freq_khz_range: [20, 200]
+  # EzCAD defaults from manual
+  delay_laser_on_us: -300
+  delay_laser_off_us: 150
+  delay_end_us: 300
+  delay_polygon_us: 100
+
+ops:
+  copper_cut:
+    speed_mm_s: 1500
+    power_pct: 100
+    freq_khz: 30
+    hatch_mm: 0.05
+    passes: 20
+    hatch_angle_rotate: true   # "rotate hatch angle periodically"
+  mask_ablate:
+    speed_mm_s: 1000
+    power_pct: 50
+    freq_khz: 100
+    hatch_mm: 0.05
+    passes: 4
+  pad_clean:
+    speed_mm_s: 1000
+    power_pct: 75
+    freq_khz: 50
+    hatch_mm: 0.05
+    passes: 1
+  drill: null   # not developed yet (Phase 1)

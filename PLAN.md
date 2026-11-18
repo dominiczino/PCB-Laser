@@ -8,106 +8,153 @@ Source idea (Todoist, "Better desktop PCB fabrication"):
 ## 1. Target outcome
 
 ```
-pcblaser run board.zip --side top --process copper,mask,cut
+pcblaser run board.zip --side top      # copper → mask → cut, pauses for operator steps
+pcblaser run board.zip --side bottom   # mirrored about the registration-pin axis
 ```
-→ parse Gerber/Excellon → generate per-layer toolpaths → preview → red-dot frame for alignment → fire laser.
-Single tool, Python, no EzCAD in the loop (EzCAD export kept as a fallback).
+Linux, Python, no EzCAD in the loop. Gerber/Excellon → toolpaths → preview → red-dot frame → mark.
 
-## 2. Key technical decisions
+## 2. Requirements (from you)
 
-| Topic | Decision | Rationale |
+- Laser-only process (no chemical etch).
+- Double-sided required.
+- Finest feature: 0.5 mm pitch parts (≈0.25 mm pads / 0.2–0.25 mm gaps).
+- Runs on Linux.
+
+## 3. Machine facts (from the B4 manual + your notes)
+
+| Item | Value | Source |
 |---|---|---|
-| Laser control | `galvoplotter` (meerk40t project) talking USB to the BJJCZ LMC board | Open-source Python driver for the same JCZ controller EzCAD2 uses; supports marking, light (red-dot) mode, speed/power/freq/pulse settings, and EzCAD `.cor` correction files. |
-| Fallback output | DXF per layer with pen assignments for EzCAD import | Unblocks testing before direct control works, and if the board turns out to be EzCAD3/DLC. |
-| Gerber parsing | `gerbonara` → `shapely` geometry | Handles RS-274X + Excellon, polarity, apertures; shapely gives booleans/offsets. |
-| Copper process | Direct ablation of copper with 1064 nm fiber (no chemistry) | Q-switched pulses ablate 1 oz Cu; isolation + optional full clearing. Chemical route (ablate paint resist → FeCl₃/persulfate) kept as alt process for large boards. |
-| Solder mask | Screen/squeegee UV-curable mask, UV cure, laser-ablate pad openings | Mask openings come straight from the GTS/GBS layer; light second pass cleans residue off pads. |
-| Silkscreen | Low-power mark on cured mask (color change), optional | Free once the mask process works. |
-| Holes / outline | Laser spiral-cut holes ≥ ~0.6 mm and board outline; small holes optionally just center-marked for a drill | Fiber chars FR4 slowly; measure before committing. |
+| Source | 30 W fiber, 1064 nm, Q-switched (not MOPA, no pulse-width control) | you; manual (LightBurn import: `IPG_YLP`, Q-pulse width disabled) |
+| PRF range | 20–200 kHz | manual (LightBurn device setup) |
+| Controller | BJJCZ LMC ("Laser Mark Control Board V2 [USB]", `USBLMCV2`), EzCAD 2.14.11 | manual |
+| USB ID | `9588:9899` | galvoplotter source |
+| Galvo mapping | Galvo 2 = X | manual |
+| Lenses | 110×110 mm (F≈160) and 200×200 mm | manual / you |
+| Correction files | `jcz11.cor` (110 mm folder), separate `.cor` in 200 mm folder, on the USB stick | manual |
+| EzCAD config | `plug/markcfg7` in each lens folder | manual (LightBurn import step) |
+| EzCAD default timing | Start TC −300 µs, Laser-off TC 150 µs, End TC 300 µs, Polygon TC 100 µs | manual screenshots |
 
-**Verify first:** controller board in the B4 (Settings/About in EzCAD, or USB VID/PID: JCZ LMC = `9588:9899`). EzCAD2 → galvoplotter works. EzCAD3/DLC2 → direct control is much harder; fall back to DXF export.
+**Lens choice:** use the 110 mm lens for all PCB work. Spot size scales ~linearly with focal length, so the 200 mm lens gives roughly 1.6× the spot diameter and ~2.5× lower fluence. That is worse for 0.2 mm gaps and slower for ablation. 110 mm usable field fits boards up to ~90 × 90 mm with margin; larger boards are out of scope for v1 (galvo + no XY stage = no tiling).
 
-## 3. Architecture
+## 4. Starting recipe (your "Laser Engraver Recipie List" → PCB Manufacturing)
+
+| Op | Speed [mm/s] | Power [%] | Freq [kHz] | Hatch [mm] | Passes | Notes |
+|---|---|---|---|---|---|---|
+| Copper cut | 1500 | 100 | 30 | 0.05 | 20 | rotate hatch angle periodically |
+| Mask ablate | 1000 | 50 | 100 | 0.05 | 4 | |
+| Pad clean | 1000 | 75 | 50 | 0.05 | 1 | light etch of pads |
+| Drilling | — | — | — | — | — | not developed yet |
+
+Lens these were tuned with is unrecorded; assume 110 mm, check in Phase 1.
+Seeded into `processes/b4_30w_110mm.yaml`.
+
+Time scale: full-clearing a 50 × 50 mm area at 0.05 mm hatch = 50 m of path/pass → 33 s/pass → ~11 min for 20 passes. Isolation-only (a ~0.3 mm band around each net) is several times faster. Default: isolation band + optional full clear.
+
+## 5. Key technical decisions
+
+| Topic | Decision |
+|---|---|
+| Laser control | `galvoplotter` 0.2.0 (meerk40t project). Pure Python over `pyusb`; on Linux just needs a udev rule, no Zadig/driver swap. Supports mark/goto/light (red-dot), speed/power/freq/delays, loads EzCAD `.cor` (both `LMC1COR_1.0` float and int formats), and has a **mock connection** for offline testing. Pin the version; vendor and patch if needed (it's a small, lightly maintained library, e.g. `set(delay_polygon=…)` currently doesn't store the value). |
+| Coordinates | Galvo units 0–65535 across the field; 110 mm lens → ~595.8 units/mm. Our transform: board mm → field mm → galvo units, with `.cor` applied in-controller and an optional residual correction on top (Phase 0b). |
+| Gerber parsing | `gerbonara` → `shapely`. |
+| Copper | Direct ablation, cross-hatched with rotating angle (per your recipe). |
+| Holes / vias / outline | Laser spiral-cut holes and outline. **Use 0.8 mm FR4** for v1: halves the cut depth through glass/epoxy vs 1.6 mm. Vias are unplated: through-wire or rivets, sized ≥0.4 mm hole. |
+| Solder mask | Screen-print UV-curable mask on the pin fixture, UV cure, laser-ablate openings from GTS/GBS (+expansion), pad-clean pass. |
+| Silkscreen | Optional low-power mark on cured mask from GTO/GBO. |
+| Fallback | DXF export per op for EzCAD on Windows (useful for A/B comparison during process tuning). |
+
+## 6. Double-sided registration (the critical part)
+
+Fixture plate bolted to the B4 table's threaded hole grid, never moved during a job. Two pin holes are **cut by the laser itself** into the plate. That puts pin positions in the laser frame by construction, with no measurement step.
+
+Per board:
+1. Pins out. Blank (oversized ~10 mm per side) placed roughly over the pin holes, held by tape/stops.
+2. Laser cuts the two registration holes through the blank at the pin coordinates.
+3. Pins pushed through blank into plate. Run top side: copper → holes/vias → (outline last, after bottom).
+4. Lift, flip about the line through both pins, re-seat on pins. Software mirrors bottom layers about that same line. Run bottom copper.
+5. Mask: print on fixture (screen frame registers to the same pins), cure, ablate openings per side.
+6. Outline cut last; tabs optional.
+
+Error budget: pin/hole clearance (target ≤0.05 mm, tune hole diameter by test) + galvo repeatability (µm-level) + residual field distortion at mirrored positions (Phase 0b). Target ≤0.1 mm side-to-side, which is fine for 0.5 mm-pitch parts and unplated vias with ≥0.15 mm annular ring.
+
+Because the flip maps a point at (x, y) to (x, 2·a − y) in the field, any uncorrected field distortion shows up twice in misregistration. Calibrating the field is therefore part of the double-sided work, not optional.
+
+## 7. Architecture
 
 ```
 pcblaser/
-  ingest.py        # unzip, identify layers by name/X2 attributes, load with gerbonara
-  geometry.py      # shapely: copper polygons, isolation regions, mask openings, outline, drills
-  toolpath.py      # isolation contours (n offsets), hatch fills (angle/spacing), hole spirals, ordering
-  transform.py     # board → lens-field coords: mirror for bottom, rotation, fiducial alignment, field fit check
-  process.py       # parameter library (YAML): power, speed, freq, pulse width, passes, hatch spacing per op
+  ingest.py        # unzip, identify layers (filename / X2 attrs), load with gerbonara
+  geometry.py      # shapely: copper, isolation regions, mask openings, outline, drills
+  toolpath.py      # isolation bands, hatch fills (angle rotation per pass), hole spirals, path ordering
+  transform.py     # board → field mm (placement, pin-axis mirror) → galvo units; residual correction
+  process.py       # load recipe YAML; per-op param sets
+  calibrate.py     # grid mark + scanner-image fit → residual correction map
   drivers/
-    galvo.py       # galvoplotter backend: light/frame, mark, abort, status
-    dxf.py         # EzCAD fallback export
-  preview.py       # matplotlib render of all ops over the board
-  testgrid.py      # power×speed×freq matrix generator for material tests
-  cli.py           # `pcblaser run|preview|frame|testgrid|calibrate`
-processes/
-  fr4_1oz_cu.yaml
-  uv_mask_green.yaml
-jigs/              # CAD for fixture + screen jig (Onshape export / STL)
+    galvo.py       # galvoplotter backend: frame (red dot), mark, abort, status
+    mock.py        # galvoplotter mock + path recorder for tests/preview
+    dxf.py         # EzCAD fallback
+  preview.py       # matplotlib render of ops over board
+  testgrid.py      # power × speed × freq × passes matrix generator
+  cli.py           # pcblaser run | preview | frame | testgrid | calibrate | fixture
+machine/           # copied from USB stick: .cor files, markcfg7 per lens
+processes/         # recipe YAMLs
+fixtures/          # CAD: pin plate, screen-print frame
 ```
 
-Data flow per job: `layers → ops[] (each: geometry, process params, pass count) → field coords → driver`.
-Every op is a list of polylines + a param set; the driver only knows "set params, mark polylines".
+Every op = (list of polylines, param set, pass count). The driver only knows "set params, mark polylines".
 
-## 4. Phases
+## 8. Phases
 
-### Phase 0 — Machine bring-up (1–2 evenings)
-- Identify controller/board, lens (field size, focal length), laser source (Raycus Q-switch vs JPT MOPA), wattage.
-- Install galvoplotter; on Windows swap EzCAD driver for WinUSB via Zadig (reversible) or run from Linux with libusb.
-- Load EzCAD's `.cor` file; draw a 50 mm square in light mode and marked on anodized Al; verify dimensions with calipers.
-- **Exit:** script marks a known square to ±0.05 mm, red-dot framing works.
+### Phase 0 — Linux bring-up
+- Copy `EZCAD for ComMarker B4/` (both lens folders) from the USB stick into `machine/`.
+- udev rule for `9588:9899`; `galvoplotter` with `cor_file=machine/110mm/jcz11.cor`, galvos_per_mm from field size, timing from `markcfg7`.
+- Red-dot frame a square, then mark 50 mm square on anodized Al / black card; verify with calipers.
+- **Exit:** ±0.05 mm on a 50 mm square, red-dot framing works, abort works.
 
-### Phase 1 — Copper process development (a few evenings)
-- `testgrid.py`: matrix of power/speed/freq/passes/hatch spacing on scrap FR4.
-- Measure: Cu fully cleared (continuity test across gap), FR4 charring, min clean gap, trace undercut.
-- Expect ~20–30 µm hatch spacing, multiple passes, cross-hatching at 0/90°; a final low-power "clean" pass.
-- **Exit:** `fr4_1oz_cu.yaml` that reliably isolates 0.2 mm traces/0.2 mm gaps (stretch: 0.15 mm).
+### Phase 0b — Field calibration (replaces Windows-only CorFile2)
+- Mark a 9×9 (or denser) crosshair grid over the usable field on black card or anodized Al.
+- Scan on a flatbed at 1200 dpi (~21 µm/px), detect crosshairs, fit residual correction (2D polynomial or bilinear grid) on top of `.cor`.
+- **Exit:** residual < 0.03 mm across the central 90 × 90 mm, verified with the mirror-symmetric test (mark, re-mark mirrored, compare).
 
-### Phase 2 — Gerber → toolpath pipeline (core software)
-- Ingest KiCad/EasyEDA zips, auto-detect layers.
-- Isolation mode: N offset contours around copper (fast). Clear mode: hatch-fill all non-copper inside the outline (cleaner, slower). Hybrid: isolation + clear within X mm.
-- Path ordering (nearest-neighbor) to cut galvo jump time; split jobs that exceed the field.
-- Preview PNG; field-fit and min-feature warnings (feature < spot size).
-- **Exit:** `pcblaser preview` matches the KiCad 3D/Gerber viewer for 3 test boards; DXF export imports into EzCAD correctly.
+### Phase 1 — Process verification on Linux
+- Reproduce your recipe through galvoplotter; confirm it matches EzCAD results (same params should give the same result, but power/frequency conversions in the library are worth checking).
+- Test grid around the recipe on 0.8 mm FR4: min clean gap, char, undercut.
+- Develop the missing **drilling** recipe (spiral pitch, passes) and outline cut.
+- **Exit:** 0.2 mm trace / 0.2 mm gap isolates reliably; 0.4–1.0 mm holes through 0.8 mm FR4.
 
-### Phase 3 — Direct control + one-click run
-- `drivers/galvo.py` with frame → confirm → run → abort.
-- Op sequencing per process (e.g. copper → outline → holes), pauses for operator steps.
-- **Exit:** single-sided board from Gerber zip to isolated copper with one command, no EzCAD.
+### Phase 2 — Gerber → toolpath pipeline
+- Ingest KiCad/EasyEDA zips; isolation band + optional clear; hatch rotation per pass; nearest-neighbor ordering; field-fit and min-feature checks.
+- Preview PNG; mock-driver tests on 3 reference boards.
+- **Exit:** preview matches the Gerber viewer; mock output path length/time estimates are sane.
 
-### Phase 4 — Fixtures and double-sided registration
-- Bed fixture: aluminum plate with 2 dowel pins at known positions in lens field, board blanks pre-drilled (or laser-cut) with matching registration holes.
-- Pins placed symmetric about the flip axis so bottom side registers by flipping on the same pins; software mirrors bottom layers about that axis.
-- Optional fiducial correction: mark/locate 2 fiducials with the red dot, solve a 2D rigid transform.
-- Vias: unplated — rivets, or wire through + solder.
-- **Exit:** double-sided test board with ≤0.1 mm layer-to-layer misregistration.
+### Phase 3 — Single-sided one-command run
+- `pcblaser run` with frame → confirm → mark → abort; operator pauses between ops.
+- **Exit:** single-sided board from zip to isolated, drilled, outlined board with one command.
+
+### Phase 4 — Fixture + double-sided
+- Pin plate (Al or FR4 sheet on standoffs bolted to the table), laser-cut pin holes, press-fit dowels sized by test.
+- Registration-hole op, pin-axis mirror transform, flip workflow.
+- **Exit:** ≤0.1 mm top/bottom misregistration on a test coupon (concentric rings top vs bottom, measured under a microscope/scanner).
 
 ### Phase 5 — Solder mask
-- Screen-print jig: hinged frame on the same dowel-pin plate, 90–120 mesh screen (or stencil + squeegee for uniform thickness), UV-curable mask, UV cure (395/405 nm LED).
-- Process grid for mask ablation over copper: remove mask fully without blackening pads.
-- Generate mask-opening ops from GTS/GBS (with expansion offset param), optional silkscreen marking from GTO/GBO.
-- **Exit:** solderable pads on a masked board, 0.5 mm pitch TSSOP pads open cleanly.
+- Screen-print frame hinged on the pin plate; UV mask, UV LED cure.
+- Mask-opening ops from GTS/GBS with expansion; pad-clean pass; optional silkscreen marking.
+- **Exit:** clean, solderable openings on a 0.5 mm-pitch footprint, both sides.
 
 ### Phase 6 — Polish
-- Simple GUI (single window: load zip, choose side/ops, preview, frame, run) — or keep CLI.
-- Job log (params used, time, notes) for process tuning.
-- Hole drilling evaluation: laser spiral vs mark-and-drill.
+- Minimal GUI or keep CLI; job log (params, time, outcome) to feed the recipe file.
 
-## 5. Risks
+## 9. Risks
 
 | Risk | Mitigation |
 |---|---|
-| B4 ships with EzCAD3/non-LMC board | Check in Phase 0; DXF fallback keeps the rest of the pipeline useful. |
-| FR4 charring / delamination from Cu ablation | Lower energy, more passes, air assist + fume extraction; prefer isolation over full clearing. |
-| Copper reflectivity → inconsistent ablation | Tune on real stock; a light pre-oxidize/matte pass can raise absorption. |
-| Galvo field distortion at edges | Use `.cor`, keep boards near field center, calibrate with a measured grid. |
-| Fumes (brominated FR4, mask resin) | Mandatory fume extraction/filtering; enclosure. |
+| galvoplotter gaps/bugs (small project) | Mock-driver tests; vendor + patch; meerk40t (same protocol, GUI) as a cross-check on Linux. EzCAD on Windows stays available. |
+| Field distortion → misregistration on flip | Phase 0b calibration; keep boards centered on the pin axis. |
+| FR4 charring at holes/outline | 0.8 mm stock, more passes at lower energy, air assist. |
+| Fumes (brominated FR4, mask resin) | Enclosure + extraction/filtration before any FR4 work. |
+| Recipe tuned on unknown lens | Verify in Phase 1 before building on it. |
 
-## 6. Open questions for you
-1. B4 wattage, source type (MOPA?), and lens/field size?
-2. EzCAD2 or EzCAD3 on your unit?
-3. Windows or Linux on the laser PC?
-4. Target min trace/space, and is double-sided required for v1?
-5. Is a chemical etch step acceptable, or strictly dry/laser-only?
+## 10. Open items
+1. Which lens was the recipe tuned with?
+2. Copy the USB stick's `EZCAD for ComMarker B4` folder into `machine/` (or Drive's "ComMarker B4 Laser Engraver" folder, then I can pull it).
+3. Do you have a flatbed scanner for Phase 0b? (Otherwise a microscope + calipers works, slower.)
